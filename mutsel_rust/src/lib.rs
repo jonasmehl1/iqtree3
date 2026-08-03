@@ -353,16 +353,9 @@ pub unsafe extern "C" fn rust_mutsel(
 
     let substitution_model = SubstitutionModel::MutSel;
 
-    let aa_dist = io::get_site_specific_aa_distribution_iqtree(
-        alignment,
-        num_sites as usize,
-        num_leaves as usize,
-    );
-
     let (S, sqrt_pi, _rate_para, _substitution_rates) = optimization::optimize_internal(
         felsenstein,
         branch_lengths,
-        aa_dist,
         mutsel_params,
         RateModel::R(1),
         prior_R_file,
@@ -562,14 +555,11 @@ pub fn optimize_rust_binary(
     let (felsenstein, distances) =
         io::process_newick_alignment(&std::fs::read_to_string(&newick).unwrap(), &sequences);
 
-    let aa_dist = io::get_site_specific_aa_distribution(&sequences);
-
     let rate_model = parse_rate_model(rate_mode);
 
     optimization::optimize_internal(
         felsenstein,
         &distances,
-        aa_dist,
         MutselParams {
             pi_reg,
             Mu_reg: R_reg,

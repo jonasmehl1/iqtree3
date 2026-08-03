@@ -72,40 +72,6 @@ pub fn read_alignment(fasta_file: &Path) -> HashMap<String, Vec<u8>> {
     sequences
 }
 
-pub fn get_site_specific_aa_distribution(sequences: &HashMap<String, Vec<u8>>) -> Tensor {
-    let num_sites = sequences.values().next().unwrap().len();
-
-    let mut data = vec![0f64; num_sites * 20];
-
-    for seq in sequences.values() {
-        for (site_idx, &residue) in seq.iter().enumerate() {
-            let aa_idx = *AMINO_MAPPING.get(&normalize_residue(residue)).unwrap_or(&20);
-            if aa_idx == 20 {
-                continue;
-            }
-            data[site_idx * 20 + aa_idx as usize] += 1.0;
-        }
-    }
-
-    Tensor::from_vec(data, &[num_sites, 20], &candle_core::Device::Cpu).unwrap()
-}
-
-pub fn get_site_specific_aa_distribution_iqtree(alignment: &[u8], L: usize, N: usize) -> Tensor {
-    let mut data = vec![0f64; L * 20];
-
-    for site_idx in 0..L {
-        for seq_idx in 0..N {
-            let residue = alignment[site_idx * N + seq_idx];
-            if residue == 20 {
-                continue;
-            }
-            data[site_idx * 20 + residue as usize] += 1.0;
-        }
-    }
-
-    Tensor::from_vec(data, &[L, 20], &candle_core::Device::Cpu).unwrap()
-}
-
 pub fn create_felsenstein_tree(
     parents: &[i32],
     distances: &[f64],

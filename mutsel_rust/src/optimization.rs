@@ -1,5 +1,4 @@
 use std::{
-    iter,
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -557,7 +556,6 @@ pub fn two_step_light_pmsf(
     felsenstein_op: FelsensteinOp,
     categories: &[[f64; 20]],
     weights: &[f64],
-    f_class: &[f64; 20],
     log_branch_lengths: &Tensor,
     mutsel_params: &super::MutselParams,
     verbosity: Verbosity,
@@ -568,7 +566,6 @@ pub fn two_step_light_pmsf(
         weights,
         1.0,
         log_branch_lengths,
-        f_class,
     );
 
     let Mu = loadMu();
@@ -594,7 +591,6 @@ pub fn two_step_light_pmsf(
             .unwrap()
             .broadcast_add(&step2_log_global_scaling)
             .unwrap(),
-        f_class,
     );
 
     (
@@ -611,7 +607,6 @@ pub fn light_pmsf(
     weights: &[f64],
     alpha: f64,
     log_branch_lengths: &Tensor,
-    f_class: &[f64; 20],
 ) -> Tensor {
     let mut likelihoods = vec![];
 
@@ -619,7 +614,7 @@ pub fn light_pmsf(
 
     let rate_model = RateParameters::gamma(1, alpha);
 
-    for category in iter::once(f_class).chain(categories.iter()) {
+    for category in categories.iter() {
         let category_tensor =
             Tensor::from_vec(category.to_vec(), &[20], &candle_core::Device::Cpu).unwrap();
         let log_pi = category_tensor.log().unwrap().unsqueeze(0).unwrap();
@@ -644,12 +639,8 @@ pub fn light_pmsf(
     let posteriors = candle_nn::ops::softmax(&weighted_likelihoods, 0).unwrap();
 
     let category_tensor = Tensor::from_vec(
-        iter::once(f_class)
-            .chain(categories.iter())
-            .flatten()
-            .copied()
-            .collect(),
-        &[categories.len() + 1, 20],
+        categories.iter().flatten().copied().collect(),
+        &[categories.len(), 20],
         &candle_core::Device::Cpu,
     )
     .unwrap();
@@ -708,7 +699,6 @@ fn loadMu() -> Tensor {
 pub fn optimize_internal(
     felsenstein: FelsensteinTree<20>,
     distances: &[f64],
-    aa_dist: Tensor,
     mutsel_params: super::MutselParams,
     rate_model: RateModel,
     prior_R_file: Option<&Path>,
@@ -718,9 +708,6 @@ pub fn optimize_internal(
     out_prefix: &str,
 ) -> Result<(Tensor, Tensor, Tensor, Vec<f64>), candle_core::Error> {
     let op = felsenstein::FelsensteinOp::new(Arc::new(Mutex::new(felsenstein)));
-
-    // 0.5 psuedo counts
-    let aa_dist = (aa_dist + 0.5).unwrap();
 
     // Lower triangular matrix with zeros everywhere else
     let init_R = if let Some(prior_R_file) = prior_R_file {
@@ -746,26 +733,10 @@ pub fn optimize_internal(
         crate::io::read_sitefreq_file(prior_pi_file)
     } else {
         // Do our lightweight PMSF procedure for the site_freq prior:
-        let f_class_weight = 0.1;
-
-        let weights = iter::once(f_class_weight)
-            .chain(
-                crate::data::UDM256_WEIGHTS
-                    .iter()
-                    .map(|w| w * (1.0 - f_class_weight)),
-            )
-            .collect::<Vec<f64>>();
-
-        let f_class = aa_dist
-            .sum(0)?
-            .broadcast_div(&aa_dist.sum_all()?.unsqueeze(0)?)?;
-        let f_class: [f64; 20] = f_class.to_vec1()?.try_into().unwrap();
-
         let (site_freq, global_scaling, alpha, log_branch_length_scaling) = two_step_light_pmsf(
             op.clone(),
             crate::data::UDM256,
-            &weights,
-            &f_class,
+            crate::data::UDM256_WEIGHTS,
             &log_branch_lengths,
             &mutsel_params,
             verbosity
