@@ -735,8 +735,8 @@ pub fn optimize_internal(
         // Do our lightweight PMSF procedure for the site_freq prior:
         let (site_freq, global_scaling, alpha, log_branch_length_scaling) = two_step_light_pmsf(
             op.clone(),
-            crate::data::UDM256,
-            crate::data::UDM256_WEIGHTS,
+            crate::data::C60,
+            crate::data::C60_WEIGHTS,
             &log_branch_lengths,
             &mutsel_params,
             verbosity
