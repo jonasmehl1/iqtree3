@@ -688,7 +688,7 @@ pub fn Mu(log_parameter: &Tensor) -> Tensor {
 
 // Used with the MutSel model.
 fn loadMu() -> Tensor {
-    let R_lower = crate::data::load_lower_R_with_equi(crate::data::CODON2_TXT);
+    let R_lower = crate::data::load_lower_R_with_equi(crate::data::M_TXT);
     let log_R = R_lower.log().unwrap();
     Mu(&log_R)
 }
@@ -714,7 +714,7 @@ pub fn optimize_internal(
         let file_content = std::fs::read_to_string(prior_R_file)?;
         crate::data::load_lower_R_with_equi(&file_content)
     } else {
-        crate::data::load_lower_R_with_equi(crate::data::CODON2_TXT)
+        crate::data::load_lower_R_with_equi(crate::data::M_TXT)
     };
 
     let log_branch_lengths =
