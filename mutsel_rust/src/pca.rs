@@ -62,13 +62,27 @@ impl PCA {
         let full_pca_coordinates = if self.num_components == 19 {
             pca_coordinates.clone()
         } else {
-            Tensor::cat(&[pca_coordinates, &pad_means.unsqueeze(0).unwrap()], 1).unwrap()
+            // One row of padding per site: cat does not broadcast a [1, k] row.
+            let num_sites = pca_coordinates.dim(0).unwrap();
+            let pad = pad_means
+                .unsqueeze(0)
+                .unwrap()
+                .broadcast_as((num_sites, 19 - self.num_components))
+                .unwrap()
+                .contiguous()
+                .unwrap();
+            Tensor::cat(&[pca_coordinates, &pad], 1).unwrap()
         };
         let log_freq = full_pca_coordinates.matmul(&self.components).unwrap();
         log_freq
     }
 
     pub fn penalty_on_pca_coordinates(&self, pca_coordinates: &Tensor, strength: f64) -> Tensor {
+        // strength divides alpha, so 0 would give alpha = inf and NaN gradients.
+        // Its limit is no penalty at all.
+        if strength == 0.0 {
+            return Tensor::zeros((), candle_core::DType::F64, pca_coordinates.device()).unwrap();
+        }
         let means = self.mean.narrow(0, 0, self.num_components).unwrap();
         let alpha = self.alpha.narrow(0, 0, self.num_components).unwrap();
         let alpha = (alpha / strength).unwrap();
@@ -151,6 +165,26 @@ mod tests {
     }
 
     #[test]
+    fn inverse_pads_every_site() {
+        let pca = PCA::new(3);
+        let coords = Tensor::from_vec(
+            vec![0.2, -0.3, 0.5, -0.1, 0.4, 0.0],
+            &[2, 3],
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+
+        let reconstructed = pca.pca_coordinates_to_log_freq(&coords);
+
+        assert_eq!(reconstructed.dims(), &[2, 20]);
+        for site in 0..2 {
+            let single = pca.pca_coordinates_to_log_freq(&coords.narrow(0, site, 1).unwrap());
+            let row = reconstructed.narrow(0, site, 1).unwrap();
+            assert!(max_abs_diff(&row, &single) < 1e-12);
+        }
+    }
+
+    #[test]
     fn penalty_is_zero_at_component_means() {
         let pca = PCA::new(5);
         let mean_coords = pca.mean.narrow(0, 0, 5).unwrap().unsqueeze(0).unwrap();
@@ -158,5 +192,23 @@ mod tests {
         let penalty = pca.penalty_on_pca_coordinates(&mean_coords, 1.0);
 
         assert!(penalty.to_scalar::<f64>().unwrap().abs() < 1e-12);
+    }
+
+    #[test]
+    fn zero_strength_is_no_penalty() {
+        let pca = PCA::new(5);
+        let coords = candle_core::Var::from_tensor(
+            &Tensor::from_vec(vec![0.2, -0.3, 0.5, -0.1, 0.4], &[1, 5], &candle_core::Device::Cpu)
+                .unwrap(),
+        )
+        .unwrap();
+
+        let penalty = pca.penalty_on_pca_coordinates(&coords, 0.0);
+        let total = (coords.sum_all().unwrap() + &penalty).unwrap();
+        let grad = total.backward().unwrap().get(&coords).unwrap().clone();
+
+        assert_eq!(penalty.to_scalar::<f64>().unwrap(), 0.0);
+        let grad = grad.flatten_all().unwrap().to_vec1::<f64>().unwrap();
+        assert!(grad.iter().all(|g| (g - 1.0).abs() < 1e-12));
     }
 }

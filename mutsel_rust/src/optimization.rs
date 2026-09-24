@@ -97,6 +97,18 @@ impl Optimizable for BranchParameters {
     fn print_state(&self) {}
 }
 
+/// Smallest site frequency in the output model. read_site_model_file (mutsel_wrapper.cpp)
+/// rejects frequencies <= 1e-10, and weakly penalised fits push residues absent from a
+/// column far below that.
+const MIN_SITE_FREQ: f64 = 1e-9;
+
+/// Normalised log frequencies with every frequency raised to at least `min_freq`.
+fn floor_log_pi(log_pi: &Tensor, min_freq: f64) -> Tensor {
+    let pi = softmax(log_pi, 1).unwrap().maximum(min_freq).unwrap();
+    let pi = pi.broadcast_div(&pi.sum_keepdim(1).unwrap()).unwrap();
+    pi.log().unwrap()
+}
+
 pub struct ModelParameters {
     pub felsenstein_op: FelsensteinWithEdgeOp,
     pub log_R: Var,
@@ -117,8 +129,18 @@ impl ModelParameters {
     }
 
     pub fn calc_rate_matrix(&self) -> (Tensor, Tensor) {
+        self.rate_matrix_from_log_pi(&self.log_pi())
+    }
+
+    /// The model handed back to IQ-TREE and written to the .sitemodel: frequencies are
+    /// floored at MIN_SITE_FREQ before S is built, so R and pi stay consistent.
+    pub fn calc_output_rate_matrix(&self) -> (Tensor, Tensor) {
+        self.rate_matrix_from_log_pi(&floor_log_pi(&self.log_pi(), MIN_SITE_FREQ))
+    }
+
+    fn rate_matrix_from_log_pi(&self, log_pi: &Tensor) -> (Tensor, Tensor) {
         let (S, sqrt_pi) =
-            calc_rate_matrix(&Mu(&self.log_R), &self.log_pi(), &tensor_full(1.0, &[]));
+            calc_rate_matrix(&Mu(&self.log_R), log_pi, &tensor_full(1.0, &[]));
         let S = S
             .broadcast_mul(
                 &self
@@ -559,11 +581,35 @@ pub fn optimize_internal(
 
     optimize(&model, 100, 500, 1e-6, 5, verbosity, out_prefix);
 
-    let (S, sqrt_pi) = model.calc_rate_matrix();
+    let (S, sqrt_pi) = model.calc_output_rate_matrix();
 
     if verbosity.should_print(Verbosity::Med) {
         model.save_npz(Path::new(&format!("{}.mutsel.npz", out_prefix)));
     }
 
     Ok((S, sqrt_pi))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_log_pi_lifts_tiny_frequencies_only() {
+        // Site 0 has one residue at exp(-40) ~ 4e-18, site 1 is uniform.
+        let mut values = vec![0.0; 40];
+        values[3] = -40.0;
+        let log_pi = Tensor::from_vec(values, &[2, 20], &candle_core::Device::Cpu).unwrap();
+
+        let pi = floor_log_pi(&log_pi, MIN_SITE_FREQ).exp().unwrap();
+        let pi = pi.to_vec2::<f64>().unwrap();
+
+        for row in &pi {
+            assert!((row.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+            assert!(row.iter().all(|&p| p > 1e-10));
+        }
+        assert!((pi[0][3] - MIN_SITE_FREQ).abs() < 1e-15);
+        assert!((pi[0][0] - 1.0 / 19.0).abs() < 1e-9);
+        assert!(pi[1].iter().all(|&p| (p - 0.05).abs() < 1e-15));
+    }
 }
