@@ -486,7 +486,7 @@ pub fn optimize_internal(
 
     let init_log_R = log_R.detach().copy().unwrap();
 
-    let pca = PCA::new(19);
+    let pca = PCA::new();
 
     let pca_coordinates = pca.log_freq_to_pca_coordinates(&init_log_pi);
 
