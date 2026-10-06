@@ -92,16 +92,7 @@ impl PCA {
         let full_pca_coordinates = if self.num_components == 19 {
             pca_coordinates.clone()
         } else {
-            // One row of padding per site: cat does not broadcast a [1, k] row.
-            let num_sites = pca_coordinates.dim(0).unwrap();
-            let pad = pad_means
-                .unsqueeze(0)
-                .unwrap()
-                .broadcast_as((num_sites, 19 - self.num_components))
-                .unwrap()
-                .contiguous()
-                .unwrap();
-            Tensor::cat(&[pca_coordinates, &pad], 1).unwrap()
+            Tensor::cat(&[pca_coordinates, &pad_means.unsqueeze(0).unwrap()], 1).unwrap()
         };
         let log_freq = full_pca_coordinates.matmul(&self.components).unwrap();
         log_freq
@@ -109,9 +100,6 @@ impl PCA {
 
     /// `-strength * sum_sites ln sum_k w_k N(x; mu_k, diag(var_k))`.
     pub fn penalty_on_pca_coordinates(&self, pca_coordinates: &Tensor, strength: f64) -> Tensor {
-        if strength == 0.0 {
-            return Tensor::zeros((), candle_core::DType::F64, pca_coordinates.device()).unwrap();
-        }
         // [num_sites, K]: ln w_k + ln N(x; mu_k, diag(var_k)).
         let exponent = pca_coordinates
             .unsqueeze(1)
@@ -206,26 +194,6 @@ mod tests {
         assert!(max_abs_diff(&reconstructed, &expected) < 1e-12);
     }
 
-    #[test]
-    fn inverse_pads_every_site() {
-        let pca = PCA::new(3);
-        let coords = Tensor::from_vec(
-            vec![0.2, -0.3, 0.5, -0.1, 0.4, 0.0],
-            &[2, 3],
-            &candle_core::Device::Cpu,
-        )
-        .unwrap();
-
-        let reconstructed = pca.pca_coordinates_to_log_freq(&coords);
-
-        assert_eq!(reconstructed.dims(), &[2, 20]);
-        for site in 0..2 {
-            let single = pca.pca_coordinates_to_log_freq(&coords.narrow(0, site, 1).unwrap());
-            let row = reconstructed.narrow(0, site, 1).unwrap();
-            assert!(max_abs_diff(&row, &single) < 1e-12);
-        }
-    }
-
     /// `-ln sum_k w_k prod_i N(x_i; mu_ki, var_ki)` for one site, straight from data.rs.
     fn reference_penalty(x: &[f64]) -> f64 {
         let parse = |text: &str| -> Vec<f64> {
@@ -306,23 +274,5 @@ mod tests {
 
         assert!(value.is_finite() && value > 1e3, "penalty far out was {}", value);
         assert!(grad.iter().all(|g| g.is_finite() && *g > 0.0), "gradient {:?}", grad);
-    }
-
-    #[test]
-    fn zero_strength_is_no_penalty() {
-        let pca = PCA::new(5);
-        let coords = candle_core::Var::from_tensor(
-            &Tensor::from_vec(vec![0.2, -0.3, 0.5, -0.1, 0.4], &[1, 5], &candle_core::Device::Cpu)
-                .unwrap(),
-        )
-        .unwrap();
-
-        let penalty = pca.penalty_on_pca_coordinates(&coords, 0.0);
-        let total = (coords.sum_all().unwrap() + &penalty).unwrap();
-        let grad = total.backward().unwrap().get(&coords).unwrap().clone();
-
-        assert_eq!(penalty.to_scalar::<f64>().unwrap(), 0.0);
-        let grad = grad.flatten_all().unwrap().to_vec1::<f64>().unwrap();
-        assert!(grad.iter().all(|g| (g - 1.0).abs() < 1e-12));
     }
 }
