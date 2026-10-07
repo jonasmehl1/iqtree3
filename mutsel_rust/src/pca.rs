@@ -5,9 +5,9 @@ pub struct PCA {
     pub components: Tensor,
     /// The diagonal Gaussian mixture prior: [K, 19] means and inverse variances, and per
     /// component `ln w_k - sum_i ln(2 pi var_ki) / 2` as [1, K].
-    gmm_mu: Tensor,
-    gmm_inv_var: Tensor,
-    gmm_logc: Tensor,
+    pub gmm_mu: Tensor,
+    pub gmm_inv_var: Tensor,
+    pub gmm_logc: Tensor,
 }
 
 impl PCA {

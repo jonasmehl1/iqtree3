@@ -41,19 +41,31 @@ fn calc_likelihood(
         .unwrap()
 }
 
+/// Branch lengths, and optionally Mu, for fixed site frequencies
 pub struct BranchParameters {
     pub felsenstein_op: FelsensteinWithEdgeOp,
     pub log_branch_lengths: Var,
-    pub Mu: Tensor,
+    pub log_R: Var,
+    pub init_log_R: Tensor,
+    pub optimize_Mu: bool,
+    pub Mu_reg: f64,
     pub log_pi: Tensor,
 }
 
 impl Optimizable for BranchParameters {
     fn variables(&self) -> Vec<Var> {
-        vec![self.log_branch_lengths.clone()]
+        if self.optimize_Mu {
+            vec![self.log_branch_lengths.clone(), self.log_R.clone()]
+        } else {
+            vec![self.log_branch_lengths.clone()]
+        }
     }
     fn variables_names(&self) -> Vec<String> {
-        vec!["log_branch_lengths".to_string()]
+        if self.optimize_Mu {
+            vec!["log_branch_lengths".to_string(), "log_R".to_string()]
+        } else {
+            vec!["log_branch_lengths".to_string()]
+        }
     }
     fn model_name(&self) -> String {
         "BranchParameters".to_string()
@@ -61,7 +73,7 @@ impl Optimizable for BranchParameters {
 
     fn likelihood(&self) -> Tensor {
         calc_likelihood(
-            &self.Mu,
+            &Mu(&self.log_R),
             &self.log_pi,
             &self.log_branch_lengths,
             self.felsenstein_op.clone(),
@@ -69,7 +81,11 @@ impl Optimizable for BranchParameters {
     }
 
     fn penalty(&self) -> Tensor {
-        tensor_full(0.0, &[])
+        if self.optimize_Mu {
+            Mu_penalty(&self.log_R, &self.init_log_R, self.Mu_reg)
+        } else {
+            tensor_full(0.0, &[])
+        }
     }
 
     fn print_state(&self) {}
@@ -155,32 +171,37 @@ impl Optimizable for ModelParameters {
             .pca_data
             .penalty_on_pca_coordinates(&self.pca_coordinates, self.reg_para.pi_reg);
 
-        fn log_Mu(log_R: &Tensor) -> Tensor {
-            let Mu = Mu(log_R);
-
-            // One out the diagonal, since we only want to penalize the off-diagonal elements
-            let Mu = (&Mu
-                - (&Mu - 1.0).unwrap()
-                    * Tensor::eye(20, candle_core::DType::F64, &candle_core::Device::Cpu).unwrap())
-            .unwrap();
-
-            return Mu.log().unwrap();
-        }
-
-        let Mu = log_Mu(&self.log_R)
-            .sub(&log_Mu(&self.init_log_R))
-            .unwrap()
-            .powf(2.0)
-            .unwrap()
-            .sum_all()
-            .unwrap();
-        let Mu_penalty = (Mu * self.reg_para.Mu_reg).unwrap();
+        let Mu_penalty = Mu_penalty(&self.log_R, &self.init_log_R, self.reg_para.Mu_reg);
 
         (pi_penalty + Mu_penalty).unwrap()
     }
 
     fn print_state(&self) {
     }
+}
+
+/// Mu_reg times the squared difference of the log off-diagonal Mu entries to the initial ones
+pub fn Mu_penalty(log_R: &Tensor, init_log_R: &Tensor, Mu_reg: f64) -> Tensor {
+    fn log_Mu(log_R: &Tensor) -> Tensor {
+        let Mu = Mu(log_R);
+
+        // One out the diagonal, since we only want to penalize the off-diagonal elements
+        let Mu = (&Mu
+            - (&Mu - 1.0).unwrap()
+                * Tensor::eye(20, candle_core::DType::F64, &candle_core::Device::Cpu).unwrap())
+        .unwrap();
+
+        return Mu.log().unwrap();
+    }
+
+    let Mu = log_Mu(log_R)
+        .sub(&log_Mu(init_log_R))
+        .unwrap()
+        .powf(2.0)
+        .unwrap()
+        .sum_all()
+        .unwrap();
+    (Mu * Mu_reg).unwrap()
 }
 
 pub fn optimize(
@@ -290,62 +311,104 @@ pub fn optimize(
     // .unwrap();
 }
 
+/// Optimizes the branch lengths, and Mu if optimize_Mu, for fixed site frequencies.
+/// Returns the log branch lengths and log_R.
 pub fn optimize_branch_lengths(
     felsenstein_op: FelsensteinWithEdgeOp,
     log_pi: &Tensor,
-    Mu: &Tensor,
+    init_log_R: &Tensor,
+    optimize_Mu: bool,
+    Mu_reg: f64,
     log_branch_lengths: &Tensor,
     verbosity: Verbosity,
     prefix: &str,
-) -> Tensor {
+) -> (Tensor, Tensor) {
     let model = BranchParameters {
         felsenstein_op,
         log_branch_lengths: Var::from_tensor(log_branch_lengths).unwrap(),
-        Mu: Mu.clone(),
+        log_R: Var::from_tensor(init_log_R).unwrap(),
+        init_log_R: init_log_R.clone(),
+        optimize_Mu,
+        Mu_reg,
         log_pi: log_pi.clone(),
     };
 
-    optimize(&model, 10, 200, 1e-6, 5, verbosity, prefix);
+    // Mu has many more parameters than the branch lengths and needs more iterations
+    let max_iterations = if optimize_Mu { 500 } else { 200 };
+    optimize(&model, 10, max_iterations, 1e-6, 5, verbosity, prefix);
 
-    model.log_branch_lengths.as_tensor().copy().unwrap()
+    (
+        model.log_branch_lengths.as_tensor().copy().unwrap(),
+        model.log_R.as_tensor().copy().unwrap(),
+    )
 }
 
+pub struct TwoStepPmsf {
+    /// Site frequencies of the second PMSF step [L, 20]
+    pub site_freq: Tensor,
+    pub log_branch_lengths: Tensor,
+    pub log_R: Tensor,
+    /// Average substitution rate over the sites at the first step frequencies, with which the
+    /// branch lengths are normalized
+    pub average_rate: f64,
+}
+
+/// PMSF site frequencies on the given branch lengths, then branch lengths (and Mu if optimize_Mu)
+/// optimized for these frequencies, then PMSF site frequencies again with the new branch lengths and Mu.
 pub fn two_step_light_pmsf(
     felsenstein_op: FelsensteinOp,
     categories: &[[f64; 20]],
     weights: &[f64],
     log_branch_lengths: &Tensor,
+    init_log_R: &Tensor,
+    optimize_Mu: bool,
+    Mu_reg: f64,
     verbosity: Verbosity,
     prefix: &str,
-) -> (Tensor, Tensor) {
+) -> TwoStepPmsf {
     let step1_site_freq = light_pmsf(
         felsenstein_op.into_with_edge_op(),
         categories,
         weights,
         log_branch_lengths,
+        &Mu(init_log_R),
     );
-
-    let Mu = loadMu();
 
     let log_pi = step1_site_freq.log().unwrap();
 
-    let log_branch_lengths = optimize_branch_lengths(
+    let (log_branch_lengths, log_R) = optimize_branch_lengths(
         felsenstein_op.into_with_edge_op(),
         &log_pi,
-        &Mu,
+        init_log_R,
+        optimize_Mu,
+        Mu_reg,
         log_branch_lengths,
         verbosity,
         prefix,
     );
+    let Mu = Mu(&log_R).detach();
+
+    let (S, sqrt_pi) = model::calc_rate_matrix(&Mu, &log_pi, &tensor_full(1.0, &[]));
+    let average_rate = model::substitution_rates_tensor(&S, &sqrt_pi)
+        .mean_all()
+        .unwrap()
+        .to_scalar::<f64>()
+        .unwrap();
 
     let final_site_freq = light_pmsf(
         felsenstein_op.into_with_edge_op(),
         categories,
         weights,
         &log_branch_lengths,
+        &Mu,
     );
 
-    (final_site_freq, log_branch_lengths)
+    TwoStepPmsf {
+        site_freq: final_site_freq,
+        log_branch_lengths,
+        log_R,
+        average_rate,
+    }
 }
 
 pub fn light_pmsf(
@@ -353,17 +416,16 @@ pub fn light_pmsf(
     categories: &[[f64; 20]],
     weights: &[f64],
     log_branch_lengths: &Tensor,
+    Mu: &Tensor,
 ) -> Tensor {
     let mut likelihoods = vec![];
-
-    let Mu = loadMu();
 
     for category in categories.iter() {
         let category_tensor =
             Tensor::from_vec(category.to_vec(), &[20], &candle_core::Device::Cpu).unwrap();
         let log_pi = category_tensor.log().unwrap().unsqueeze(0).unwrap();
 
-        let (S, sqrt_pi) = model::calc_rate_matrix(&Mu, &log_pi, &tensor_full(1.0, &[]));
+        let (S, sqrt_pi) = model::calc_rate_matrix(Mu, &log_pi, &tensor_full(1.0, &[]));
 
         let likelihood = S
             .apply_op3(
@@ -439,11 +501,14 @@ pub fn Mu(log_parameter: &Tensor) -> Tensor {
     (Q + pi).unwrap()
 }
 
-// Used with the MutSel model.
-fn loadMu() -> Tensor {
-    let R_lower = crate::data::load_lower_R_with_equi(crate::data::M_TXT);
-    let log_R = R_lower.log().unwrap();
-    Mu(&log_R)
+/// Lower triangular R with the mutation equilibrium on the diagonal, from the prior file or M_TXT
+pub fn load_init_R(prior_R_file: Option<&Path>) -> Result<Tensor, candle_core::Error> {
+    Ok(if let Some(prior_R_file) = prior_R_file {
+        let file_content = std::fs::read_to_string(prior_R_file)?;
+        crate::data::load_lower_R_with_equi(&file_content)
+    } else {
+        crate::data::load_lower_R_with_equi(crate::data::M_TXT)
+    })
 }
 
 /// Returns the optimal S, sqrt_pi and rate parameters.
@@ -460,22 +525,24 @@ pub fn optimize_internal(
     let op = felsenstein::FelsensteinOp::new(Arc::new(Mutex::new(felsenstein)));
 
     // Lower triangular matrix with zeros everywhere else
-    let init_R = if let Some(prior_R_file) = prior_R_file {
-        let file_content = std::fs::read_to_string(prior_R_file)?;
-        crate::data::load_lower_R_with_equi(&file_content)
-    } else {
-        crate::data::load_lower_R_with_equi(crate::data::M_TXT)
-    };
+    let init_R = load_init_R(prior_R_file)?;
 
     let log_branch_lengths =
         Tensor::from_slice(distances, &[distances.len()], &candle_core::Device::Cpu)?.log()?;
 
     // Do our lightweight PMSF procedure for initialization:
-    let (site_freq, log_branch_lengths) = two_step_light_pmsf(
+    let TwoStepPmsf {
+        site_freq,
+        log_branch_lengths,
+        ..
+    } = two_step_light_pmsf(
         op.clone(),
         crate::data::UDM256,
         crate::data::UDM256_WEIGHTS,
         &log_branch_lengths,
+        &init_R.log()?,
+        false,
+        mutsel_params.Mu_reg,
         verbosity,
         out_prefix,
     );

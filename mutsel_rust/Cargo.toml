@@ -9,6 +9,8 @@ candle-nn = "0.9.2"
 phylo_grad = { git = "https://github.com/soedinglab/phylo_grad", rev = "527e79c5b2ed5a705aaf711f1c00f342e3379569" }
 rayon = "1.11.0"
 libc = "0.2.182"
+nuts-rs = "0.18.3"
+thiserror = "2.0.20"
 
 [lib]
 name = "mutsel_rust"

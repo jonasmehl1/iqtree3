@@ -2,6 +2,7 @@
 
 pub mod data;
 pub mod felsenstein;
+pub mod hmc;
 mod io;
 pub mod model;
 mod pca;
@@ -81,14 +82,6 @@ pub unsafe extern "C" fn rust_mutsel(
 
     let mutsel_params = parse_mutsel_str(model_str);
 
-    let felsenstein = create_felsenstein_tree(
-        parents,
-        branch_lengths,
-        alignment,
-        num_sites as usize,
-        num_leaves as usize,
-    );
-
     let prior_R_file = if prior_R_file.is_null() {
         None
     } else {
@@ -96,14 +89,38 @@ pub unsafe extern "C" fn rust_mutsel(
         Some(Path::new(cstr.to_str().unwrap()))
     };
 
-    let (S, sqrt_pi) = optimization::optimize_internal(
-        felsenstein,
-        branch_lengths,
-        mutsel_params,
-        prior_R_file,
-        crate::Verbosity::from_u8(verbose),
-        out_prefix,
-    )
+    // Posterior sampling of the site frequencies with Monte Carlo EM for Mu and the branch lengths,
+    // or with MUTSEL_HMC=0 the joint MAP estimate.
+    let use_hmc = std::env::var("MUTSEL_HMC").map_or(true, |value| value.trim() != "0");
+    let (S, sqrt_pi) = if use_hmc {
+        hmc::sample_internal(
+            parents,
+            branch_lengths,
+            alignment,
+            num_sites as usize,
+            num_leaves as usize,
+            mutsel_params,
+            prior_R_file,
+            crate::Verbosity::from_u8(verbose),
+            out_prefix,
+        )
+    } else {
+        let felsenstein = create_felsenstein_tree(
+            parents,
+            branch_lengths,
+            alignment,
+            num_sites as usize,
+            num_leaves as usize,
+        );
+        optimization::optimize_internal(
+            felsenstein,
+            branch_lengths,
+            mutsel_params,
+            prior_R_file,
+            crate::Verbosity::from_u8(verbose),
+            out_prefix,
+        )
+    }
     .unwrap();
 
     let (R, pi) = model::phylograd2iqtree_parametrization(&S, &sqrt_pi).unwrap();
